@@ -1,13 +1,12 @@
-What if I want to have a different agents inside codex, one for example for brainstorm and plan, second for code implementation, 3 for testing, 4 for code review and so on, is it possible to do and how I can do that
+What if I want different agents inside Codex: one for solution exploration and planning, another for implementation, a third for testing, and a fourth for code review?
 
 Yes — you can build a multi-agent development workflow in OpenAI Codex, where different agents specialize in different parts of the software development lifecycle.
 
 For example, you could have:
 
-- Brainstorm Agent — explores ideas, requirements, and architectural approaches.
-- Planning Agent — turns ideas into implementation plans and tasks.
-- Implementation Agent — writes code based on the approved plan.
-- Testing Agent — creates tests, executes them, and identifies failures.
+- Planning Agent — explores alternatives and turns the recommended approach into an implementation plan.
+- Implementation Agent — writes production code from the approved plan and uses explicit state models for non-trivial workflows instead of contradictory boolean flags.
+- Testing Agent — derives unit, integration, and end-to-end tests from requirements, executes them, and identifies false-green coverage.
 - Code Review Agent — reviews changes for bugs, security, performance, and maintainability.
 - Orchestrator Agent — coordinates the others and tracks the overall workflow.
 
@@ -23,13 +22,9 @@ Orchestrator (Main Codex Agent)
 
 Coordinates work, delegates tasks, collects results
 
-Brainstorm
-
-Ideas and trade-offs
-
 Planner
 
-Architecture and tasks
+Alternatives, trade-offs, architecture, and tasks
 
 Developer
 
@@ -43,11 +38,7 @@ Reviewer
 
 Quality and security
 
-Docs
-
-Documentation
-
-Some agents can work in parallel, while others should work sequentially. For example, brainstorming and codebase exploration can happen together, but implementation should generally wait for an approved plan.
+Some agents can work in parallel, while others should work sequentially. Planning should finish before implementation, while testing and review can run in parallel after implementation.
 
 ## 2. Create your custom agents
 
@@ -61,7 +52,6 @@ my-project/
 ├── .codex/
 │   ├── config.toml
 │   └── agents/
-│       ├── brainstorm.toml
 │       ├── planner.toml
 │       ├── developer.toml
 │       ├── tester.toml
@@ -71,34 +61,7 @@ my-project/
 
 Each `.toml` file represents one specialized agent.
 
-### Brainstorm agent
-
-`.codex/agents/brainstorm.toml`
-
-```
-
-name = "brainstorm"
-description = "Explores feature ideas, alternatives, and trade-offs."
-
-model_reasoning_effort = "high"
-
-developer_instructions = """
-You are a product and technical brainstorming specialist.
-
-Responsibilities:
-- Explore multiple possible solutions.
-- Identify technical trade-offs.
-- Challenge assumptions.
-- Consider scalability and maintainability.
-- Recommend approaches with reasoning.
-
-Rules:
-- Do not modify code.
-- Do not implement features.
-- Present alternatives before recommending one.
-"""
-
-```
+The examples below are abbreviated for readability. The files under `.codex/agents/` are the source of truth for the complete agent instructions.
 
 ### Planning agent
 
@@ -107,25 +70,25 @@ Rules:
 ```
 
 name = "planner"
-description = "Creates technical implementation plans and architecture."
+description = "Explores solution options and produces an evidence-based technical implementation plan for approval."
 
 model_reasoning_effort = "high"
 
 developer_instructions = """
-You are a senior software architect.
+You are a senior product-minded software architect. You own both solution exploration and implementation planning.
 
 Responsibilities:
-- Analyze requirements and existing code.
-- Design implementation architecture.
-- Break work into small tasks.
-- Identify dependencies and risks.
-- Define acceptance criteria.
+- Analyze requirements and relevant existing code.
+- Explore materially different solutions and their trade-offs.
+- Recommend one approach with explicit reasoning.
+- Design the implementation architecture and ordered tasks.
+- Identify dependencies, risks, validation steps, and acceptance criteria.
 
 Rules:
-- Do not implement code.
-- Prefer existing project conventions.
-- Produce actionable implementation plans.
-- Identify decisions requiring user approval.
+- Do not modify files or implement code.
+- Prefer reuse and the smallest defensible change.
+- Distinguish verified facts from assumptions.
+- Request approval before implementation begins.
 """
 
 ```
@@ -137,24 +100,28 @@ Rules:
 ```
 
 name = "developer"
-description = "Implements approved plans and fixes."
+description = "Implements approved plans with explicit, testable state models and minimal maintainable production changes."
 
 model_reasoning_effort = "medium"
 
 developer_instructions = """
-You are a senior software engineer.
+You are a senior software engineer responsible for implementing approved plans as production-quality code.
 
 Responsibilities:
-- Implement approved technical plans.
-- Follow existing architecture and conventions.
-- Write clean, maintainable code.
-- Make minimal necessary changes.
+- Implement the smallest complete change that satisfies the approved requirements.
+- Reuse existing abstractions and keep business behavior centralized.
+- Before adding state variables, identify states, events, transitions, guards, side effects, and error/recovery paths.
+- Use one canonical state for mutually exclusive lifecycle stages instead of combinations of writable `is...` flags.
+- Use a focused FSM or transition-controlled model when a workflow has constrained lifecycle transitions.
+- Test allowed and invalid transitions, guards, and success/failure/recovery paths.
 
 Rules:
 - Do not introduce unapproved architecture changes.
 - Avoid unrelated refactoring.
-- Run relevant checks when possible.
-- Report changed files and remaining risks.
+- Simple independent binary facts may remain booleans; do not introduce an FSM when it adds no clarity.
+- Prefer small workflow-specific machines over one application-wide machine.
+- Do not scatter direct state assignments or duplicate behavior across entry points.
+- Run relevant checks and report exact results and remaining risks.
 """
 
 ```
@@ -166,24 +133,28 @@ Rules:
 ```
 
 name = "tester"
-description = "Creates and runs tests, validates implementation."
+description = "Derives unit, integration, and end-to-end tests from approved requirements and audits them for false-green behavior."
 
 model_reasoning_effort = "high"
 
 developer_instructions = """
-You are a software QA and testing specialist.
+You are an independent software QA and testing specialist. The implementation is the system under test, not the source of truth.
 
 Responsibilities:
-- Analyze implemented functionality.
-- Create unit and integration tests.
-- Identify edge cases.
+- Derive expected behavior from approved requirements and user outcomes.
+- Create a requirement-to-test traceability matrix.
+- Create unit, integration, contract, and end-to-end tests at the appropriate layers.
+- Cover boundaries, invalid input, state transitions, failures, concurrency, and other relevant edge cases.
+- Verify that important tests fail when their target behavior is deliberately broken.
 - Run relevant test suites.
-- Report failures with reproduction steps.
+- Report requirement/implementation conflicts instead of changing tests to match incorrect behavior.
 
 Rules:
 - Do not change production code.
-- Do not hide or skip failing tests.
-- Distinguish verified results from assumptions.
+- Do not copy the production algorithm into expected values.
+- Do not weaken, skip, or rewrite tests merely to make the suite pass.
+- Missing or conflicting requirements produce INDETERMINATE, never PASS.
+- Distinguish verified evidence, requirement-derived expectations, assumptions, and unknowns.
 """
 
 ```
@@ -195,25 +166,26 @@ Rules:
 ```
 
 name = "reviewer"
-description = "Reviews changes for correctness, security, and quality."
+description = "Deployment-gate reviewer focused on critical correctness, security, data, reliability, performance, and verification risks."
 
 model_reasoning_effort = "high"
 
 developer_instructions = """
-You are a strict senior code reviewer.
+You are a strict senior code reviewer and deployment gatekeeper.
 
 Responsibilities:
 - Review changes against the approved plan.
-- Identify bugs and security vulnerabilities.
-- Find performance and concurrency issues.
-- Check maintainability and test coverage.
-- Report actionable findings with file references.
+- Inventory all changed artifacts and inspect relevant callers and dependencies.
+- Check security, data integrity, concurrency, performance, business logic, infrastructure, test coverage, and duplicated behavior.
+- Report actionable findings with file and line references and concrete evidence.
+- Return a GO, NO-GO, or INDETERMINATE deployment verdict.
 
 Rules:
 - Do not modify files.
-- Prioritize correctness over style.
-- Classify findings by severity.
-- Avoid speculative or unsupported findings.
+- Any evidence-supported BLOCKER requires NO-GO.
+- Missing essential evidence requires INDETERMINATE, never GO.
+- Do not claim checks passed unless they were executed.
+- Avoid speculative findings and style-only comments.
 """
 
 ```
@@ -234,11 +206,7 @@ max_concurrent_threads_per_session = 5
 
 This allows up to five spawned agents to be open concurrently, excluding the main agent.
 
-Current Codex releases have subagents enabled by default, so this is primarily for explicitly setting your concurrency preference.&#x20;
-
-[image](https://www.google.com/s2/favicons?domain=https://learn.chatgpt.com&sz=32)
-
-ChatGPT Learn+1
+Current Codex releases have subagents enabled by default, so this is primarily for explicitly setting your concurrency preference.
 
 ## 4. Define the workflow in AGENTS.md
 
@@ -253,16 +221,17 @@ For example:
 Use specialized Codex subagents for development tasks.
 
 ## Roles
-- brainstorm: Explore ideas and alternatives.
-- planner: Design architecture and implementation steps.
-- developer: Implement approved changes.
-- tester: Write and run tests.
+- planner: Explore alternatives, recommend an approach, and produce the implementation plan.
+- developer: Implement approved changes with explicit state modeling; use focused finite-state machines for workflows with constrained lifecycle transitions instead of contradictory boolean flags.
+- tester: Derive and run unit, integration, and end-to-end tests from approved requirements, independently of the current implementation.
 - reviewer: Independently review code changes.
 
 ## Workflow
 
-1. For a new feature, delegate initial exploration
-   to brainstorm and planner.
+1. Before any substantive implementation, delegate solution exploration
+   and implementation planning to planner. Trivial documentation or
+   formatting-only changes may skip planner delegation but still require
+   approval for their scope.
 2. Present the proposed plan for user approval.
 3. After approval, delegate implementation
    to developer.
@@ -276,6 +245,7 @@ Use specialized Codex subagents for development tasks.
 ## Rules
 
 - Do not implement before plan approval.
+- A direct user request to implement a specifically scoped change counts as approval for that scope. If planning introduces unresolved choices or expands the scope, present the revised plan and obtain fresh approval.
 - Do not let reviewer modify production code.
 - Do not claim tests passed unless executed.
 - Avoid concurrent edits to the same files.
@@ -283,11 +253,7 @@ Use specialized Codex subagents for development tasks.
 
 ```
 
-Codex reads applicable `AGENTS.md` instructions, and these can direct it to use subagents. This is a useful way to make the workflow repeatable without writing a long prompt every time.&#x20;
-
-[image](https://www.google.com/s2/favicons?domain=https://learn.chatgpt.com&sz=32)
-
-ChatGPT Learn+1
+Codex reads applicable `AGENTS.md` instructions, and these can direct it to use subagents. This is a useful way to make the workflow repeatable without writing a long prompt every time.
 
 ## 5. How you actually use it
 
@@ -297,11 +263,9 @@ Example prompt to Codex
 
 Build a user authentication feature using our multi-agent workflow.
 
-First, have brainstorm explore options and planner prepare an implementation plan. Wait for my approval before writing code.
+First, have planner explore the viable options, recommend one, and prepare an implementation plan. Wait for my approval before writing code.
 
 Then have developer implement the approved solution. After implementation, run tester and reviewer in parallel. Fix critical findings and report the final results.
-
-&#x20;Copy prompt
 
 Codex can spawn the appropriate subagents, collect their results, and continue the workflow. In the CLI, you can use `/subagents` to inspect agent threads.
 
@@ -312,12 +276,12 @@ There are a few things worth knowing:
 - Subagents aren't separate permanent services. They are spawned as needed and have their own working context.
 - They can work in parallel, but concurrent code edits require coordination. Git worktrees can help isolate larger independent changes.
 - They inherit the main session's permissions. Telling the reviewer not to edit files is an instruction, not a hard read-only security boundary.
-- More agents use more tokens. Five agents won't necessarily outperform one agent for a small task.
+- More agents use more tokens. Four agents won't necessarily outperform one agent for a small task.
 - The workflow isn't a rigid pipeline engine. `AGENTS.md` guides behavior; if you need guaranteed stage transitions and approval gates, you would need additional orchestration or automation.
 
 ## My recommended starting setup
 
-For most software projects, I would start with five specialized agents plus one orchestrator, as above. Add dedicated security, performance, documentation, or database agents only when your project warrants them.
+For most software projects, I would start with four specialized agents plus one orchestrator, as above. Add dedicated security, performance, documentation, or database agents only when your project warrants them.
 
 One question: Are you using Codex in the VS Code extension, the terminal CLI, or the standalone Codex app?
 
