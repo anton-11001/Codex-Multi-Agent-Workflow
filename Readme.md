@@ -1,288 +1,155 @@
-What if I want different agents inside Codex: one for solution exploration and planning, another for implementation, a third for testing, and a fourth for code review?
+# Codex Multi-Agent Development Workflow
 
-Yes — you can build a multi-agent development workflow in OpenAI Codex, where different agents specialize in different parts of the software development lifecycle.
+This project configures one primary Codex agent to orchestrate four specialized subagents:
 
-For example, you could have:
+- `planner` explores the problem, clarifies requirements, and produces a plan.
+- `developer` implements an explicitly approved plan.
+- `tester` derives and executes requirement-based tests.
+- `reviewer` independently reviews the stable implementation and test changes.
 
-- Planning Agent — explores alternatives and turns the recommended approach into an implementation plan.
-- Implementation Agent — writes production code from the approved plan and uses explicit state models for non-trivial workflows instead of contradictory boolean flags.
-- Testing Agent — derives unit, integration, and end-to-end tests from requirements, executes them, and identifies false-green coverage.
-- Code Review Agent — reviews changes for bugs, security, performance, and maintainability.
-- Orchestrator Agent — coordinates the others and tracks the overall workflow.
+The primary agent is the orchestrator because it owns the user conversation and approval record. There is intentionally no `orchestrator.toml`: another subagent would add a context handoff without making the approval boundary stronger.
 
-The important distinction is between giving agents different roles and instructions and having separate agents that can actually run independently or in parallel.
+`AGENTS.md` is the canonical workflow contract. The files under `.codex/agents/` define each specialist's responsibilities, and `.codex/config.toml` enables subagent execution.
 
-Codex supports workflows involving specialized agents, but the setup depends on whether you're using the Codex CLI, IDE extension, or Codex app.
+## Architecture
 
-## 1. How the architecture should work
-
-I recommend one main Codex agent that delegates tasks to specialized subagents.
-
-Orchestrator (Main Codex Agent)
-
-Coordinates work, delegates tasks, collects results
-
-Planner
-
-Alternatives, trade-offs, architecture, and tasks
-
-Developer
-
-Code implementation
-
-Tester
-
-Tests and validation
-
-Reviewer
-
-Quality and security
-
-Some agents can work in parallel, while others should work sequentially. Planning should finish before implementation, while testing and review can run in parallel after implementation.
-
-## 2. Create your custom agents
-
-Codex supports custom agents using TOML configuration files. This is documented in the [official Codex subagents guide](https://learn.chatgpt.com/docs/agent-configuration/subagents?utm_source=chatgpt.com).
-
-Inside your project, create:
-
-```
-my-project/
-├── AGENTS.md
-├── .codex/
-│   ├── config.toml
-│   └── agents/
-│       ├── planner.toml
-│       ├── developer.toml
-│       ├── tester.toml
-│       └── reviewer.toml
-└── src/
+```text
+User <-> Primary Codex agent (orchestrator)
+                    |
+                    +-- planner
+                    +-- developer
+                    +-- tester
+                    +-- reviewer
 ```
 
-Each `.toml` file represents one specialized agent.
+The orchestrator selects agents; specialists do not independently advance the workflow. A specialist receives a bounded handoff and returns evidence to the orchestrator.
 
-The examples below are abbreviated for readability. The files under `.codex/agents/` are the source of truth for the complete agent instructions.
+## Lifecycle
 
-### Planning agent
+The workflow has one canonical state:
 
-`.codex/agents/planner.toml`
-
+```text
+DISCOVERY
+    -> PLANNING
+    -> AWAITING_PLAN_APPROVAL
+    -> IMPLEMENTING
+    -> TESTING
+    -> REVIEWING
+    -> COMPLETE
 ```
 
-name = "planner"
-description = "Explores solution options and produces an evidence-based technical implementation plan for approval."
+Every development task begins in `DISCOVERY`. The primary agent announces each state transition and the evidence that opened the next gate. Agent completion by itself never advances the workflow, and transitions not defined by `AGENTS.md` are forbidden.
 
-model_reasoning_effort = "high"
+The gates are intentionally sequential:
 
-developer_instructions = """
-You are a senior product-minded software architect. You own both solution exploration and implementation planning.
+1. During `DISCOVERY`, the primary agent discusses the desired outcome, scope, constraints, and success criteria with the user. It may ask `planner` to inspect the repository.
+2. During `PLANNING`, only `planner` may be delegated. The primary agent relays questions and consolidates the answers into a versioned final plan.
+3. During `AWAITING_PLAN_APPROVAL`, the plan is displayed and work stops until the user explicitly approves that exact version.
+4. During `IMPLEMENTING`, `developer` receives the frozen approved baseline and owns production changes.
+5. During `TESTING`, `tester` receives the same baseline, may add test-only artifacts, and executes the required checks after developer writes have stopped.
+6. During `REVIEWING`, `reviewer` examines the stable combined production-and-test diff without modifying it.
+7. `COMPLETE` is reached only after required tests pass and review returns `GO`.
 
-Responsibilities:
-- Analyze requirements and relevant existing code.
-- Explore materially different solutions and their trade-offs.
-- Recommend one approach with explicit reasoning.
-- Design the implementation architecture and ordered tasks.
-- Identify dependencies, risks, validation steps, and acceptance criteria.
+A test failure or review finding returns the workflow to `IMPLEMENTING`. Every fix is tested and reviewed again:
 
-Rules:
-- Do not modify files or implement code.
-- Prefer reuse and the smallest defensible change.
-- Distinguish verified facts from assumptions.
-- Request approval before implementation begins.
-"""
-
+```text
+IMPLEMENTING -> TESTING -> REVIEWING
+      ^            |           |
+      +------------+-----------+
 ```
 
-### Developer agent
+## Approval semantics
 
-`.codex/agents/developer.toml`
+The final plan includes a plan identifier or version, scope and exclusions, verified codebase findings, the selected approach, ordered tasks, acceptance criteria, validation, risks, and assumptions.
 
+Only an unambiguous user response approving that final displayed plan version opens the implementation gate. None of the following count as approval:
+
+- the initial request to build or change something;
+- answers to clarification questions;
+- silence or lack of objection;
+- permission to inspect or plan;
+- approval of an older plan version.
+
+A material change to scope, architecture, externally visible behavior, acceptance criteria, risk, migration, or validation invalidates approval. The workflow returns to `PLANNING`, creates a new version, and requests approval again.
+
+This is an instruction-level gate. If an organization requires non-bypassable, persisted, or auditable approval across independent sessions, it should add an external workflow engine or approval store.
+
+## Handoff contract
+
+Every downstream handoff contains the same frozen baseline:
+
+- the explicitly approved plan identifier/version;
+- requirements and acceptance criteria;
+- assumptions, exclusions, and constraints;
+- the receiving agent's responsibility and file ownership;
+- the repository baseline or changed-artifact scope;
+- required checks and completion-report format.
+
+Developer, tester, and reviewer must stop if approval evidence or the baseline is missing. They may not infer approval, redesign the solution, or silently change the plan.
+
+If a new primary session is started after planning, persist or paste the full versioned plan and its explicit approval record into that session. A reference such as "use the previous plan" is not a sufficient frozen baseline when the previous conversation is unavailable.
+
+## Stable verification
+
+The shared workspace sequence is:
+
+```text
+developer -> tester -> reviewer
 ```
 
-name = "developer"
-description = "Implements approved plans with explicit, testable state models and minimal maintainable production changes."
+Testing and review are not run concurrently in one workspace because the tester may still write test artifacts while the reviewer is inventorying changes. They may run in parallel only against the same immutable snapshot in isolated worktrees or equivalent isolation.
 
-model_reasoning_effort = "medium"
+Outcomes are handled as follows:
 
-developer_instructions = """
-You are a senior software engineer responsible for implementing approved plans as production-quality code.
+- tester `PASS` advances to review;
+- tester `FAIL` returns to implementation;
+- tester `INDETERMINATE` remains unresolved until evidence is supplied and testing is rerun;
+- reviewer `GO` advances to completion;
+- reviewer `NO-GO` returns to implementation;
+- reviewer `INDETERMINATE` remains unresolved until evidence is supplied and review is rerun.
 
-Responsibilities:
-- Implement the smallest complete change that satisfies the approved requirements.
-- Reuse existing abstractions and keep business behavior centralized.
-- Before adding state variables, identify states, events, transitions, guards, side effects, and error/recovery paths.
-- Use one canonical state for mutually exclusive lifecycle stages instead of combinations of writable `is...` flags.
-- Use a focused FSM or transition-controlled model when a workflow has constrained lifecycle transitions.
-- Test allowed and invalid transitions, guards, and success/failure/recovery paths.
+Missing evidence is never treated as success. Checks are reported as passed only when the exact command was executed successfully.
 
-Rules:
-- Do not introduce unapproved architecture changes.
-- Avoid unrelated refactoring.
-- Simple independent binary facts may remain booleans; do not introduce an FSM when it adds no clarity.
-- Prefer small workflow-specific machines over one application-wide machine.
-- Do not scatter direct state assignments or duplicate behavior across entry points.
-- Run relevant checks and report exact results and remaining risks.
-"""
+## Project configuration
 
+```text
+.
+|-- AGENTS.md
+|-- .codex/
+|   |-- config.toml
+|   `-- agents/
+|       |-- planner.toml
+|       |-- developer.toml
+|       |-- tester.toml
+|       `-- reviewer.toml
+`-- src/
 ```
 
-### Testing agent
+`.codex/config.toml` enables subagents and configures concurrency. Concurrency is capacity, not permission to bypass lifecycle gates.
 
-`.codex/agents/tester.toml`
+Each role file is the source of truth for that specialist's detailed behavior. `AGENTS.md` remains the source of truth for ordering, approval, state transitions, and cross-agent handoffs.
 
+## Example interaction
+
+```text
+User: Build a user authentication feature using the project workflow.
+
+Primary agent:
+1. Enters DISCOVERY and clarifies the outcome and constraints.
+2. Delegates exploration and planning to planner.
+3. Relays questions and produces Plan auth-v1.
+4. Displays auth-v1 and waits without starting implementation.
+
+User: I approve plan auth-v1.
+
+Primary agent:
+5. Delegates auth-v1 to developer.
+6. After implementation stops, delegates auth-v1 to tester.
+7. After test writes and runs stop, delegates the stable result to reviewer.
+8. Routes any findings through the full fix-test-review loop.
+9. Reports completion and residual risks.
 ```
 
-name = "tester"
-description = "Derives unit, integration, and end-to-end tests from approved requirements and audits them for false-green behavior."
+## Deployment
 
-model_reasoning_effort = "high"
-
-developer_instructions = """
-You are an independent software QA and testing specialist. The implementation is the system under test, not the source of truth.
-
-Responsibilities:
-- Derive expected behavior from approved requirements and user outcomes.
-- Create a requirement-to-test traceability matrix.
-- Create unit, integration, contract, and end-to-end tests at the appropriate layers.
-- Cover boundaries, invalid input, state transitions, failures, concurrency, and other relevant edge cases.
-- Verify that important tests fail when their target behavior is deliberately broken.
-- Run relevant test suites.
-- Report requirement/implementation conflicts instead of changing tests to match incorrect behavior.
-
-Rules:
-- Do not change production code.
-- Do not copy the production algorithm into expected values.
-- Do not weaken, skip, or rewrite tests merely to make the suite pass.
-- Missing or conflicting requirements produce INDETERMINATE, never PASS.
-- Distinguish verified evidence, requirement-derived expectations, assumptions, and unknowns.
-"""
-
-```
-
-### Code review agent
-
-`.codex/agents/reviewer.toml`
-
-```
-
-name = "reviewer"
-description = "Deployment-gate reviewer focused on critical correctness, security, data, reliability, performance, and verification risks."
-
-model_reasoning_effort = "high"
-
-developer_instructions = """
-You are a strict senior code reviewer and deployment gatekeeper.
-
-Responsibilities:
-- Review changes against the approved plan.
-- Inventory all changed artifacts and inspect relevant callers and dependencies.
-- Check security, data integrity, concurrency, performance, business logic, infrastructure, test coverage, and duplicated behavior.
-- Report actionable findings with file and line references and concrete evidence.
-- Return a GO, NO-GO, or INDETERMINATE deployment verdict.
-
-Rules:
-- Do not modify files.
-- Any evidence-supported BLOCKER requires NO-GO.
-- Missing essential evidence requires INDETERMINATE, never GO.
-- Do not claim checks passed unless they were executed.
-- Avoid speculative findings and style-only comments.
-"""
-
-```
-
-Notice that each agent has its own instructions and reasoning effort. You can also assign different models to agents using the `model` field, provided those models are available in your Codex environment.
-
-## 3. Configure multi-agent execution
-
-In `.codex/config.toml`:
-
-```
-
-[agents]
-enabled = true
-max_concurrent_threads_per_session = 5
-
-```
-
-This allows up to five spawned agents to be open concurrently, excluding the main agent.
-
-Current Codex releases have subagents enabled by default, so this is primarily for explicitly setting your concurrency preference.
-
-## 4. Define the workflow in AGENTS.md
-
-The agent files define who does the work. Your `AGENTS.md` can define how they collaborate.
-
-For example:
-
-```
-
-# Development Workflow
-
-Use specialized Codex subagents for development tasks.
-
-## Roles
-- planner: Explore alternatives, recommend an approach, and produce the implementation plan.
-- developer: Implement approved changes with explicit state modeling; use focused finite-state machines for workflows with constrained lifecycle transitions instead of contradictory boolean flags.
-- tester: Derive and run unit, integration, and end-to-end tests from approved requirements, independently of the current implementation.
-- reviewer: Independently review code changes.
-
-## Workflow
-
-1. Before any substantive implementation, delegate solution exploration
-   and implementation planning to planner. Trivial documentation or
-   formatting-only changes may skip planner delegation but still require
-   approval for their scope.
-2. Present the proposed plan for user approval.
-3. After approval, delegate implementation
-   to developer.
-4. When implementation is complete, delegate
-   testing and code review in parallel.
-5. Collect findings and send necessary fixes
-   back to developer.
-6. Re-run affected tests and review.
-7. Summarize results and unresolved issues.
-
-## Rules
-
-- Do not implement before plan approval.
-- A direct user request to implement a specifically scoped change counts as approval for that scope. If planning introduces unresolved choices or expands the scope, present the revised plan and obtain fresh approval.
-- Do not let reviewer modify production code.
-- Do not claim tests passed unless executed.
-- Avoid concurrent edits to the same files.
-- Require user approval before deployment.
-
-```
-
-Codex reads applicable `AGENTS.md` instructions, and these can direct it to use subagents. This is a useful way to make the workflow repeatable without writing a long prompt every time.
-
-## 5. How you actually use it
-
-Once configured, open Codex in your project and give the main agent a request such as:
-
-Example prompt to Codex
-
-Build a user authentication feature using our multi-agent workflow.
-
-First, have planner explore the viable options, recommend one, and prepare an implementation plan. Wait for my approval before writing code.
-
-Then have developer implement the approved solution. After implementation, run tester and reviewer in parallel. Fix critical findings and report the final results.
-
-Codex can spawn the appropriate subagents, collect their results, and continue the workflow. In the CLI, you can use `/subagents` to inspect agent threads.
-
-## 6. Important limitations
-
-There are a few things worth knowing:
-
-- Subagents aren't separate permanent services. They are spawned as needed and have their own working context.
-- They can work in parallel, but concurrent code edits require coordination. Git worktrees can help isolate larger independent changes.
-- They inherit the main session's permissions. Telling the reviewer not to edit files is an instruction, not a hard read-only security boundary.
-- More agents use more tokens. Four agents won't necessarily outperform one agent for a small task.
-- The workflow isn't a rigid pipeline engine. `AGENTS.md` guides behavior; if you need guaranteed stage transitions and approval gates, you would need additional orchestration or automation.
-
-## My recommended starting setup
-
-For most software projects, I would start with four specialized agents plus one orchestrator, as above. Add dedicated security, performance, documentation, or database agents only when your project warrants them.
-
-One question: Are you using Codex in the VS Code extension, the terminal CLI, or the standalone Codex app?
-
-I can tailor the setup to that environment, including how to select agents manually, run them in parallel, and make the workflow as automatic as possible.
+Workflow completion authorizes only the approved workspace changes. Merging, deployment, publishing, releasing, or another external state change requires separate explicit user approval.
